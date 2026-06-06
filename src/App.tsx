@@ -372,8 +372,8 @@ function App() {
   });
 
   return (
-    <div style={{ minHeight: "100vh", padding: "32px 24px 48px", fontFamily: "Inter, system-ui, sans-serif", color: "#102a43", background: "linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%)" }}>
-      <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
+    <div className="app-root">
+      <div className="app-shell">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px", flexWrap: "wrap", marginBottom: "24px" }}>
           <div>
             <h1 style={{ margin: 0, fontSize: "2rem", letterSpacing: "-0.03em" }}>Shift Income Manager</h1>
@@ -569,8 +569,9 @@ function App() {
             ))}
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "4px", marginTop: "4px" }}>
-            {calendarCells.map((cell, index) => {
+          <div className="calendar-scroll-wrapper">
+            <div className="calendar-grid" style={{ marginTop: "4px" }}>
+              {calendarCells.map((cell, index) => {
               const cellDay = Number(cell.label);
               const cellDate = new Date(calendarYear, calendarMonth, cellDay);
               const isToday =
@@ -618,8 +619,9 @@ function App() {
               );
             })}
           </div>
-        </section>
-      )}
+        </div>
+      </section>
+    )}
 
       {activeTab === "calendar" && selectedDateKey && workDateSummary[selectedDateKey] && (
         <section style={{ marginTop: "24px", padding: "24px", borderRadius: "24px", background: "rgba(255,255,255,0.96)", boxShadow: "0 24px 60px rgba(15,23,42,0.08)", border: "1px solid rgba(148,163,184,0.24)" }}>
