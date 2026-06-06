@@ -1,4 +1,21 @@
+import { useState } from "react";
 import { useGoogleLogin } from "@react-oauth/google";
+
+type ParsedEmail = {
+  id: string;
+  subject?: string;
+  body?: string;
+  workDate?: string;
+  workPlace?: string;
+  startTime?: string;
+  endTime?: string;
+  mealTime?: string;
+  workHours?: number;
+  customer?: string;
+  workers?: string;
+  overtime?: string;
+  meetingPlace?: string;
+};
 
 function getValue(text: string, label: string) {
   const lines = text
@@ -58,113 +75,237 @@ function calcWorkHours(
   return workMinutes / 60;
 }
 
+function extractBodyData(payload: any): string | undefined {
+  if (!payload) return undefined;
+  if (payload.body?.data) return payload.body.data;
+
+  if (Array.isArray(payload.parts)) {
+    for (const part of payload.parts) {
+      const data = extractBodyData(part);
+      if (data) return data;
+    }
+  }
+
+  return undefined;
+}
+
+function decodeBodyData(data: string) {
+  const normalized = data.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(
+    normalized.length + ((4 - (normalized.length % 4)) % 4),
+    "="
+  );
+
+  return decodeURIComponent(escape(atob(padded)));
+}
+
 function App() {
+  const [emails, setEmails] = useState<ParsedEmail[]>([]);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | undefined>(undefined);
+
+  const appendLog = (message: string) => {
+    setLogs((prev) => [...prev, message]);
+    console.log(message);
+  };
+
   const login = useGoogleLogin({
     scope: "https://www.googleapis.com/auth/gmail.readonly",
 
     onSuccess: async (tokenResponse) => {
-      console.log("ログイン成功");
+      setLoading(true);
+      setError(undefined);
+      setEmails([]);
+      setLogs([]);
 
-      const response = await fetch(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=subject:作業確認",
-        {
-          headers: {
-            Authorization: `Bearer ${tokenResponse.access_token}`,
-          },
-        }
-      );
+      appendLog("ログイン成功");
 
-      const data = await response.json();
-
-      console.log("作業確認メール一覧");
-      console.log(data);
-
-      if (!data.messages || data.messages.length === 0) {
-        console.log("作業確認メールが見つかりません");
-        return;
-      }
-
-      const messageId = data.messages[0].id;
-
-      const mailResponse = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${tokenResponse.access_token}`,
-          },
-        }
-      );
-
-      const mailData = await mailResponse.json();
-
-      const subject = mailData.payload.headers.find(
-        (header: any) => header.name === "Subject"
-      );
-
-      console.log("件名");
-      console.log(subject?.value);
-
-      if (mailData.payload.body?.data) {
-        const decodedBody = decodeURIComponent(
-          escape(
-            atob(
-              mailData.payload.body.data
-                .replace(/-/g, "+")
-                .replace(/_/g, "/")
-            )
-          )
+      try {
+        const response = await fetch(
+          "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=subject:作業確認",
+          {
+            headers: {
+              Authorization: `Bearer ${tokenResponse.access_token}`,
+            },
+          }
         );
 
-        console.log("本文");
-        console.log(decodedBody);
+        const data = await response.json();
 
-        const workDate = getValue(decodedBody, "作業日");
-        const workPlace = getValue(decodedBody, "詳細現場名");
-        const startTime = getValue(decodedBody, "始業時刻");
-        const endTime = getValue(decodedBody, "終業時刻");
-        const customer = getValue(decodedBody, "顧客名称");
-        const workers = getValue(decodedBody, "現場人数");
-        const overtime = getValue(decodedBody, "残業");
-        const meetingPlace = getValue(decodedBody, "集合場所名称");
-        const mealTime = getValue(decodedBody, "食事時間");
+        appendLog("作業確認メール一覧取得完了");
+        appendLog(JSON.stringify(data, null, 2));
 
-        const workHours = calcWorkHours(
-          startTime,
-          endTime,
-          mealTime
+        if (!data.messages || data.messages.length === 0) {
+          appendLog("作業確認メールが見つかりません");
+          return;
+        }
+
+        const messageList = data.messages as { id: string }[];
+        appendLog(`対象メール数: ${messageList.length}`);
+
+        const parsedEmails = await Promise.all(
+          messageList.map(async (message) => {
+            const mailResponse = await fetch(
+              `https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${tokenResponse.access_token}`,
+                },
+              }
+            );
+
+            const mailData = await mailResponse.json();
+            const subjectHeader = mailData.payload.headers.find(
+              (header: any) => header.name === "Subject"
+            );
+            const subject = subjectHeader?.value;
+            const bodyData = extractBodyData(mailData.payload);
+            const decodedBody = bodyData ? decodeBodyData(bodyData) : undefined;
+
+            if (!decodedBody) {
+              appendLog(`メール ${message.id} の本文が見つかりません`);
+            }
+
+            const workDate = decodedBody ? getValue(decodedBody, "作業日") : undefined;
+            const workPlace = decodedBody ? getValue(decodedBody, "詳細現場名") : undefined;
+            const startTime = decodedBody ? getValue(decodedBody, "始業時刻") : undefined;
+            const endTime = decodedBody ? getValue(decodedBody, "終業時刻") : undefined;
+            const customer = decodedBody ? getValue(decodedBody, "顧客名称") : undefined;
+            const workers = decodedBody ? getValue(decodedBody, "現場人数") : undefined;
+            const overtime = decodedBody ? getValue(decodedBody, "残業") : undefined;
+            const meetingPlace = decodedBody ? getValue(decodedBody, "集合場所名称") : undefined;
+            const mealTime = decodedBody ? getValue(decodedBody, "食事時間") : undefined;
+
+            const workHours = calcWorkHours(startTime, endTime, mealTime);
+
+            appendLog(`メール【${subject || message.id}】を解析しました`);
+
+            return {
+              id: message.id,
+              subject,
+              body: decodedBody,
+              workDate,
+              workPlace,
+              startTime,
+              endTime,
+              mealTime,
+              workHours,
+              customer,
+              workers,
+              overtime,
+              meetingPlace,
+            };
+          })
         );
 
-        console.log("抽出結果");
-
-        console.log({
-          workDate,
-          workPlace,
-          startTime,
-          endTime,
-          mealTime,
-          workHours,
-          customer,
-          workers,
-          overtime,
-          meetingPlace,
-        });
-      } else {
-        console.log("本文が見つかりません");
+        setEmails(parsedEmails);
+      } catch (fetchError) {
+        appendLog("メール取得中にエラーが発生しました");
+        setError("メールの取得中にエラーが発生しました。コンソールログを確認してください。");
+      } finally {
+        setLoading(false);
       }
     },
 
     onError: () => {
-      console.log("ログイン失敗");
+      appendLog("ログイン失敗");
+      setError("Gmailログインに失敗しました。");
+      setLoading(false);
     },
   });
 
   return (
-    <div style={{ padding: "40px" }}>
+    <div style={{ padding: "40px", fontFamily: "sans-serif" }}>
       <h1>Shift Income Manager</h1>
 
-      <button onClick={() => login()}>
-        Gmailに接続
+      <button
+        onClick={() => login()}
+        disabled={loading}
+        style={{ padding: "10px 16px", fontSize: "16px" }}
+      >
+        {loading ? "読み込み中..." : "Gmailに接続"}
       </button>
+
+      {error && (
+        <div style={{ marginTop: "16px", color: "#d32f2f" }}>
+          {error}
+        </div>
+      )}
+
+      <section style={{ marginTop: "32px" }}>
+        <h2>取得したメール一覧 ({emails.length})</h2>
+        {emails.length === 0 ? (
+          <p>まだ取得したメールがありません。</p>
+        ) : (
+          emails.map((email) => (
+            <div
+              key={email.id}
+              style={{
+                border: "1px solid #ddd",
+                borderRadius: "8px",
+                padding: "16px",
+                marginBottom: "16px",
+                background: "#fff",
+              }}
+            >
+              <h3>{email.subject || "件名なし"}</h3>
+              <p>
+                <strong>作業日:</strong> {email.workDate || "-"}
+              </p>
+              <p>
+                <strong>詳細現場名:</strong> {email.workPlace || "-"}
+              </p>
+              <p>
+                <strong>始業時刻:</strong> {email.startTime || "-"} <strong>終業時刻:</strong> {email.endTime || "-"}
+              </p>
+              <p>
+                <strong>食事時間:</strong> {email.mealTime || "-"}
+              </p>
+              <p>
+                <strong>実働時間:</strong> {email.workHours != null ? `${email.workHours}h` : "-"}
+              </p>
+              <p>
+                <strong>顧客名称:</strong> {email.customer || "-"}
+              </p>
+              <p>
+                <strong>現場人数:</strong> {email.workers || "-"}
+              </p>
+              <p>
+                <strong>残業:</strong> {email.overtime || "-"}
+              </p>
+              <p>
+                <strong>集合場所名称:</strong> {email.meetingPlace || "-"}
+              </p>
+              {email.body && (
+                <details style={{ marginTop: "12px" }}>
+                  <summary>本文（展開）</summary>
+                  <pre style={{ whiteSpace: "pre-wrap", marginTop: "8px" }}>
+                    {email.body}
+                  </pre>
+                </details>
+              )}
+            </div>
+          ))
+        )}
+      </section>
+
+      <section style={{ marginTop: "32px" }}>
+        <h2>ログ</h2>
+        <pre
+          style={{
+            whiteSpace: "pre-wrap",
+            background: "#f9f9f9",
+            padding: "16px",
+            borderRadius: "8px",
+            minHeight: "150px",
+            maxHeight: "320px",
+            overflow: "auto",
+          }}
+        >
+          {logs.join("\n")}
+        </pre>
+      </section>
     </div>
   );
 }
