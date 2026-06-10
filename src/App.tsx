@@ -15,16 +15,12 @@ type ParsedEmail = {
   workers?: string;
   overtime?: string;
   meetingPlace?: string;
+  workAddress?: string;
+  notes?: string;
+  calendarEventId?: string;
 };
 
-type Tab = "home" | "calendar" | "settings";
-
-type WorkDateSummary = {
-  hours: number;
-  pay: number;
-  places: string[];
-  emails: ParsedEmail[];
-};
+type Tab = "home" | "settings";
 
 function getValue(text: string, label: string) {
   const lines = text
@@ -136,42 +132,28 @@ function parseWorkDate(input: string): Date | undefined {
   return undefined;
 }
 
-const weekDayNames = ["日", "月", "火", "水", "木", "金", "土"];
+function parseTime(time?: string) {
+  if (!time) return undefined;
+  const match = time.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return undefined;
+  return {
+    hours: Number(match[1]),
+    minutes: Number(match[2]),
+  };
+}
 
-function getCalendarCells(target: Date) {
-  const year = target.getFullYear();
-  const month = target.getMonth();
-  const firstDay = new Date(year, month, 1);
-  const startWeek = firstDay.getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const daysInPrevMonth = new Date(year, month, 0).getDate();
-  const totalCells = Math.ceil((startWeek + daysInMonth) / 7) * 7;
-  const cells: { label: string; currentMonth: boolean; dayNumber: number }[] = [];
+function formatDateISO(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
 
-  for (let i = 0; i < totalCells; i += 1) {
-    const dayNumber = i - startWeek + 1;
-    if (dayNumber <= 0) {
-      cells.push({
-        label: String(daysInPrevMonth + dayNumber),
-        currentMonth: false,
-        dayNumber: dayNumber,
-      });
-    } else if (dayNumber > daysInMonth) {
-      cells.push({
-        label: String(dayNumber - daysInMonth),
-        currentMonth: false,
-        dayNumber: dayNumber,
-      });
-    } else {
-      cells.push({
-        label: String(dayNumber),
-        currentMonth: true,
-        dayNumber: dayNumber,
-      });
-    }
-  }
-
-  return cells;
+function buildEventDateTime(date: Date, time: string, timeZone: string) {
+  const parsed = parseTime(time);
+  if (!parsed) return undefined;
+  const eventDate = new Date(date.getFullYear(), date.getMonth(), date.getDate(), parsed.hours, parsed.minutes);
+  return {
+    dateTime: eventDate.toISOString(),
+    timeZone,
+  };
 }
 
 function App() {
@@ -212,43 +194,11 @@ function App() {
     }
   });
   const [activeTab, setActiveTab] = useState<Tab>("home");
-  const [calendarDate, setCalendarDate] = useState(() => new Date());
-  const [selectedDateKey, setSelectedDateKey] = useState<string | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [registerMessage, setRegisterMessage] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
-
-  const workDateSummary = emails.reduce<Record<string, WorkDateSummary>>((acc, email) => {
-    if (!email.workDate || email.workHours == null) return acc;
-    const parsed = parseWorkDate(email.workDate);
-    if (!parsed) return acc;
-
-    const key = `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
-    const amount = email.workHours * hourlyRate + transportCost;
-
-    if (!acc[key]) {
-      acc[key] = { hours: 0, pay: 0, places: [], emails: [] };
-    }
-
-    acc[key].hours += email.workHours;
-    acc[key].pay += amount;
-
-    if (email.workPlace && !acc[key].places.includes(email.workPlace)) {
-      acc[key].places.push(email.workPlace);
-    }
-
-    acc[key].emails.push(email);
-    return acc;
-  }, {});
-
-  const calendarYear = calendarDate.getFullYear();
-  const calendarMonth = calendarDate.getMonth();
-  const calendarToday = new Date();
-  const calendarCells = getCalendarCells(calendarDate);
-  const calendarMonthKeys = Object.keys(workDateSummary).filter((key) => {
-    const [y, m] = key.split("-").map((value) => Number(value));
-    return y === calendarYear && m - 1 === calendarMonth;
-  });
-  const calendarMonthlyTotal = calendarMonthKeys.reduce((sum, key) => sum + (workDateSummary[key]?.pay || 0), 0);
 
   useEffect(() => {
     try {
@@ -267,15 +217,29 @@ function App() {
   };
 
   const login = useGoogleLogin({
-    scope: "https://www.googleapis.com/auth/gmail.readonly",
+    scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.events",
 
     onSuccess: async (tokenResponse) => {
       setLoading(true);
       setError(undefined);
-      setEmails([]);
+      setRegisterMessage(undefined);
+      setAccessToken(tokenResponse.access_token);
       setLogs([]);
 
       appendLog("ログイン成功");
+
+      const savedEmails: ParsedEmail[] = (() => {
+        if (typeof window === "undefined") return [];
+        try {
+          const stored = localStorage.getItem("shift-income-emails");
+          return stored ? JSON.parse(stored) as ParsedEmail[] : [];
+        } catch {
+          return [];
+        }
+      })();
+      const savedEventIds = new Map<string, string | undefined>(
+        savedEmails.map((email) => [email.id, email.calendarEventId])
+      );
 
       try {
         const response = await fetch(
@@ -331,6 +295,8 @@ function App() {
             const workers = decodedBody ? getValue(decodedBody, "現場人数") : undefined;
             const overtime = decodedBody ? getValue(decodedBody, "残業") : undefined;
             const meetingPlace = decodedBody ? getValue(decodedBody, "集合場所名称") : undefined;
+            const workAddress = decodedBody ? getValue(decodedBody, "現場住所") : undefined;
+            const notes = decodedBody ? getValue(decodedBody, "伝達事項") : undefined;
             const mealTime = decodedBody ? getValue(decodedBody, "食事時間") : undefined;
 
             const workHours = calcWorkHours(startTime, endTime, mealTime);
@@ -351,6 +317,9 @@ function App() {
               workers,
               overtime,
               meetingPlace,
+              workAddress,
+              notes,
+              calendarEventId: savedEventIds.get(message.id),
             };
           })
         );
@@ -371,16 +340,219 @@ function App() {
     },
   });
 
+  const createCalendarEvent = async (email: ParsedEmail): Promise<string | undefined> => {
+    if (!accessToken) {
+      throw new Error("Google カレンダーに接続されていません。");
+    }
+
+    if (!email.workDate) {
+      throw new Error("作業日がありません。イベント登録できませんでした。");
+    }
+
+    const eventDate = parseWorkDate(email.workDate);
+    if (!eventDate) {
+      throw new Error("作業日の形式を解析できませんでした。"
+      );
+    }
+
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    let start: Record<string, string> = {};
+    let end: Record<string, string> = {};
+
+    if (email.startTime && email.endTime) {
+      const startDateTime = buildEventDateTime(eventDate, email.startTime, timeZone);
+      const endDateTime = buildEventDateTime(eventDate, email.endTime, timeZone);
+      if (startDateTime && endDateTime) {
+        start = { dateTime: startDateTime.dateTime, timeZone: startDateTime.timeZone };
+        end = { dateTime: endDateTime.dateTime, timeZone: endDateTime.timeZone };
+      }
+    }
+
+    if (!start.dateTime || !end.dateTime) {
+      const nextDay = new Date(eventDate);
+      nextDay.setDate(nextDay.getDate() + 1);
+      start = { date: formatDateISO(eventDate) };
+      end = { date: formatDateISO(nextDay) };
+    }
+
+    const descriptionItems = [
+      email.notes ? `伝達事項: ${email.notes}` : undefined,
+      email.customer ? `顧客名称: ${email.customer}` : undefined,
+      email.body ? `\n---\n${email.body}` : undefined,
+    ].filter(Boolean);
+
+    const eventBody = {
+      summary: email.workPlace || email.subject || "作業予定",
+      location: email.workAddress || email.meetingPlace || undefined,
+      description: descriptionItems.join("\n"),
+      start,
+      end,
+    };
+
+    try {
+      appendLog(`イベント作成リクエスト: ${email.id} - ${eventBody.summary}`);
+      const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(eventBody),
+      });
+
+      const result = await response.json();
+      appendLog(`Google API レスポンス(status=${response.status}): ${JSON.stringify(result)}`);
+
+      if (!response.ok) {
+        throw new Error(result.error?.message || `Google カレンダーへの登録に失敗しました。(status=${response.status})`);
+      }
+
+      return result.id;
+    } catch (err) {
+      appendLog(`createCalendarEvent エラー (${email.id}): ${err}`);
+      throw err;
+    }
+  };
+
+  const registerCalendarEvents = async () => {
+    setError(undefined);
+    setRegisterMessage(undefined);
+    appendLog("registerCalendarEvents 開始");
+
+    if (!accessToken) {
+      setError("Gmail に接続して Google カレンダー権限を許可してください。");
+      return;
+    }
+
+    if (emails.length === 0) {
+      setError("登録するメールがありません。");
+      return;
+    }
+
+    setRegistering(true);
+    const updatedEmails = [...emails];
+    let registeredCount = 0;
+
+    const checkEventExists = async (eventId: string | undefined) => {
+      if (!eventId) return false;
+      if (!accessToken) return false;
+      try {
+        const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 410) {
+            appendLog(`イベント確認: ${eventId} は見つかりません (status=${res.status})`);
+            return false;
+          }
+          appendLog(`イベント確認で非OKステータス: ${res.status}`);
+          return false;
+        }
+        const data = await res.json();
+        if (data?.status === "cancelled") {
+          appendLog(`イベント確認: ${eventId} はキャンセル済みです`);
+          return false;
+        }
+        return true;
+      } catch (err) {
+        appendLog(`イベント確認エラー: ${err}`);
+        return false;
+      }
+    };
+
+    const findExistingEvent = async (email: ParsedEmail) => {
+      if (!accessToken || !email.workDate) return undefined;
+      const eventDate = parseWorkDate(email.workDate);
+      if (!eventDate) return undefined;
+
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      // time window: whole day
+      const dayStart = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate(), 0, 0).toISOString();
+      const dayEnd = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate() + 1, 0, 0).toISOString();
+
+      const q = encodeURIComponent((email.workPlace || email.subject || "").slice(0, 250));
+      try {
+        const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(dayStart)}&timeMax=${encodeURIComponent(dayEnd)}&q=${q}&singleEvents=true`;
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) return undefined;
+        const data = await res.json();
+        if (!data.items || data.items.length === 0) return undefined;
+        // try to find best match: exact summary
+        const summaryTarget = (email.workPlace || email.subject || "").trim();
+        for (const item of data.items) {
+          if ((item.summary || "").trim() === summaryTarget) return item.id;
+        }
+        // fallback: return first item
+        return data.items[0].id;
+      } catch (err) {
+        appendLog(`既存イベント検索エラー: ${err}`);
+        return undefined;
+      }
+    };
+
+    for (let i = 0; i < updatedEmails.length; i += 1) {
+      const email = updatedEmails[i];
+
+      appendLog(`処理中メール: ${email.id} calendarEventId=${email.calendarEventId}`);
+      if (email.calendarEventId) {
+        // イベントが実際に存在するか確認。存在すればスキップ、404なら再登録検討
+        const exists = await checkEventExists(email.calendarEventId);
+        if (exists) {
+          appendLog(`イベント存在: ${email.calendarEventId} を確認。スキップします`);
+          continue;
+        }
+        appendLog(`既存イベントが見つかりません（削除済み）: ${email.workPlace || email.subject}`);
+        updatedEmails[i] = { ...email, calendarEventId: undefined };
+      }
+
+      // 同じ日付・タイトルで既にカレンダーに存在するイベントがないか検索
+      try {
+        const foundId = await findExistingEvent(updatedEmails[i]);
+        appendLog(`findExistingEvent result for ${updatedEmails[i].id}: ${foundId}`);
+        if (foundId) {
+          updatedEmails[i] = { ...updatedEmails[i], calendarEventId: foundId };
+          appendLog(`カレンダー上で既存イベントを発見しました: ${updatedEmails[i].workPlace || updatedEmails[i].subject}`);
+          continue;
+        }
+      } catch (err) {
+        appendLog(`既存イベント検索失敗: ${err}`);
+      }
+
+      try {
+        const eventId = await createCalendarEvent(updatedEmails[i]);
+        appendLog(`createCalendarEvent returned: ${eventId}`);
+        if (eventId) {
+          updatedEmails[i] = { ...updatedEmails[i], calendarEventId: eventId };
+          registeredCount += 1;
+          appendLog(`Googleカレンダーに登録しました: ${updatedEmails[i].workPlace || updatedEmails[i].subject}`);
+        }
+      } catch (createError) {
+        appendLog(`イベント登録に失敗しました (${updatedEmails[i].subject || updatedEmails[i].id}): ${createError}`);
+      }
+    }
+
+    setEmails(updatedEmails);
+    setRegistering(false);
+
+    if (registeredCount > 0) {
+      setRegisterMessage(`${registeredCount} 件を Google カレンダーに登録しました。`);
+    } else {
+      setRegisterMessage("新規登録するイベントはありませんでした。");
+    }
+  };
+
   return (
     <div className="app-root">
       <div className="app-shell">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px", flexWrap: "wrap", marginBottom: "24px" }}>
           <div>
             <h1 style={{ margin: 0, fontSize: "2rem", letterSpacing: "-0.03em" }}>Shift Income Manager</h1>
-            <p style={{ margin: "8px 0 0", color: "#475569" }}>メールから給与情報を抽出し、カレンダーで月間集計できます。</p>
+            <p style={{ margin: "8px 0 0", color: "#475569" }}>メールから予定情報を抽出し、Google カレンダーに自動登録できます。</p>
           </div>
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            {(["home", "calendar", "settings"] as Tab[]).map((tab) => (
+            {(["home", "settings"] as Tab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -401,7 +573,7 @@ function App() {
                   (event.currentTarget as HTMLButtonElement).style.transform = "none";
                 }}
               >
-                {tab === "home" ? "ホーム" : tab === "calendar" ? "カレンダー" : "設定"}
+                {tab === "home" ? "ホーム" : "設定"}
               </button>
             ))}
           </div>
@@ -416,23 +588,45 @@ function App() {
 
       {activeTab === "home" && (
         <>
-          <button
-            onClick={() => login()}
-            disabled={loading}
-            style={{
-              padding: "12px 20px",
-              fontSize: "16px",
-              marginTop: "24px",
-              color: "#fff",
-              border: "none",
-              borderRadius: "12px",
-              background: "linear-gradient(135deg, #2563eb 0%, #38bdf8 100%)",
-              boxShadow: "0 16px 32px rgba(56,189,248,0.18)",
-              cursor: "pointer",
-            }}
-          >
-            {loading ? "読み込み中..." : "Gmailに接続"}
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", marginTop: "24px" }}>
+            <button
+              onClick={() => login()}
+              disabled={loading}
+              style={{
+                padding: "12px 20px",
+                fontSize: "16px",
+                color: "#fff",
+                border: "none",
+                borderRadius: "12px",
+                background: "linear-gradient(135deg, #2563eb 0%, #38bdf8 100%)",
+                boxShadow: "0 16px 32px rgba(56,189,248,0.18)",
+                cursor: "pointer",
+              }}
+            >
+              {loading ? "読み込み中..." : "Gmailに接続"}
+            </button>
+            <button
+              onClick={registerCalendarEvents}
+              disabled={loading || registering || emails.length === 0}
+              style={{
+                padding: "12px 20px",
+                fontSize: "16px",
+                color: "#0f172a",
+                border: "1px solid #cbd5e1",
+                borderRadius: "12px",
+                background: "#fff",
+                boxShadow: "0 10px 20px rgba(15,23,42,0.06)",
+                cursor: "pointer",
+              }}
+            >
+              {registering ? "登録中..." : "カレンダーに登録"}
+            </button>
+          </div>
+          {registerMessage && (
+            <div style={{ marginTop: "16px", color: "#1e3a8a" }}>
+              {registerMessage}
+            </div>
+          )}
 
           <section style={{ marginTop: "32px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px" }}>
@@ -482,6 +676,15 @@ function App() {
                   <p>
                     <strong>集合場所名称:</strong> {email.meetingPlace || "-"}
                   </p>
+                  <p>
+                    <strong>現場住所:</strong> {email.workAddress || "-"}
+                  </p>
+                  <p>
+                    <strong>伝達事項:</strong> {email.notes || "-"}
+                  </p>
+                  <p style={{ margin: "4px 0", color: "#0f172a", fontWeight: 700 }}>
+                    {email.calendarEventId ? "Google カレンダー登録済み" : "未登録"}
+                  </p>
                   {email.body && (
                     <details style={{ marginTop: "12px" }}>
                       <summary>本文（展開）</summary>
@@ -514,148 +717,6 @@ function App() {
             </pre>
           </section>
         </>
-      )}
-
-      {activeTab === "calendar" && (
-        <section style={{ marginTop: "32px", padding: "24px", borderRadius: "24px", background: "rgba(255,255,255,0.96)", boxShadow: "0 24px 60px rgba(15,23,42,0.08)", border: "1px solid rgba(148,163,184,0.24)" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "16px" }}>
-            <div>
-              <h2 style={{ margin: 0 }}>カレンダー</h2>
-              <div style={{ color: "#475569", marginTop: "6px" }}>
-                {calendarYear}年 {calendarMonth + 1}月
-              </div>
-              <div style={{ marginTop: "10px", color: "#0f172a", fontWeight: 700, fontSize: "1.05rem" }}>
-                合計: ¥{Math.round(calendarMonthlyTotal)}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <button
-                onClick={() => {
-                  setCalendarDate(new Date(calendarYear, calendarMonth - 1, 1));
-                  setSelectedDateKey(null);
-                }}
-                style={{ padding: "10px 14px", borderRadius: "12px", border: "1px solid #cbd5e1", background: "#fff", cursor: "pointer", boxShadow: "0 10px 20px rgba(15,23,42,0.06)" }}
-              >
-                前月
-              </button>
-              <button
-                onClick={() => {
-                  setCalendarDate(new Date(calendarYear, calendarMonth + 1, 1));
-                  setSelectedDateKey(null);
-                }}
-                style={{ padding: "10px 14px", borderRadius: "12px", border: "1px solid #cbd5e1", background: "#fff", cursor: "pointer", boxShadow: "0 10px 20px rgba(15,23,42,0.06)" }}
-              >
-                次月
-              </button>
-            </div>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "6px", marginTop: "18px" }}>
-            {weekDayNames.map((name) => (
-              <div
-                key={name}
-                style={{
-                  textAlign: "center",
-                  padding: "10px 0",
-                  background: "#f8fafc",
-                  borderRadius: "10px",
-                  fontWeight: "700",
-                  color: "#334155",
-                  boxShadow: "inset 0 -1px 0 rgba(148,163,184,0.2)",
-                }}
-              >
-                {name}
-              </div>
-            ))}
-          </div>
-
-          <div className="calendar-scroll-wrapper">
-            <div className="calendar-grid" style={{ marginTop: "4px" }}>
-              {calendarCells.map((cell, index) => {
-              const cellDay = Number(cell.label);
-              const cellDate = new Date(calendarYear, calendarMonth, cellDay);
-              const isToday =
-                cell.currentMonth &&
-                calendarToday.getFullYear() === calendarYear &&
-                calendarToday.getMonth() === calendarMonth &&
-                cellDay === calendarToday.getDate();
-              const key = `${cellDate.getFullYear()}-${String(cellDate.getMonth() + 1).padStart(2, "0")}-${String(cellDate.getDate()).padStart(2, "0")}`;
-              const summary = cell.currentMonth ? workDateSummary[key] : undefined;
-              const isSelected = selectedDateKey === key;
-
-              return (
-                <div
-                  key={`${cell.label}-${index}`}
-                  onClick={() => {
-                    if (cell.currentMonth) {
-                      setSelectedDateKey(summary ? key : null);
-                    }
-                  }}
-                  style={{
-                    minHeight: "82px",
-                    padding: "14px",
-                    borderRadius: "16px",
-                    background: isSelected ? "#dbeafe" : cell.currentMonth ? "#ffffff" : "#eef2ff",
-                    color: cell.currentMonth ? "#0f172a" : "#94a3b8",
-                    border: isToday ? "2px solid #2563eb" : "1px solid rgba(148,163,184,0.3)",
-                    textAlign: "right",
-                    position: "relative",
-                    cursor: cell.currentMonth ? "pointer" : "default",
-                    boxShadow: isSelected ? "0 18px 40px rgba(37,99,235,0.12)" : "none",
-                    transition: "transform 0.2s, box-shadow 0.2s",
-                  }}
-                >
-                  <div style={{ fontSize: "14px", fontWeight: isToday ? "700" : "400" }}>
-                    {cell.label}
-                  </div>
-                  {summary && (
-                    <div style={{ marginTop: "6px", fontSize: "12px", color: "#1976d2", textAlign: "left" }}>
-                      <div>{summary.hours.toFixed(1)}h</div>
-                      <div>¥{Math.round(summary.pay)}</div>
-                      <div style={{ color: "#333" }}>{summary.places.slice(0, 2).join(" / ")}</div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </section>
-    )}
-
-      {activeTab === "calendar" && selectedDateKey && workDateSummary[selectedDateKey] && (
-        <section style={{ marginTop: "24px", padding: "24px", borderRadius: "24px", background: "rgba(255,255,255,0.96)", boxShadow: "0 24px 60px rgba(15,23,42,0.08)", border: "1px solid rgba(148,163,184,0.24)" }}>
-          <h3 style={{ margin: 0, marginBottom: "16px" }}>詳細: {selectedDateKey}</h3>
-          {workDateSummary[selectedDateKey].emails.map((email) => (
-            <div
-              key={email.id}
-              style={{
-                border: "1px solid rgba(148,163,184,0.35)",
-                borderRadius: "18px",
-                padding: "20px",
-                marginBottom: "16px",
-                background: "#fff",
-                boxShadow: "0 18px 36px rgba(15,23,42,0.06)",
-              }}
-            >
-              <div style={{ marginBottom: "10px" }}>
-                <strong style={{ fontSize: "1rem", color: "#0f172a" }}>{email.subject || "件名なし"}</strong>
-              </div>
-              <div style={{ marginBottom: "12px", color: "#475569", lineHeight: 1.7 }}>
-                <div>詳細現場名: {email.workPlace || "-"}</div>
-                <div>実働時間: {email.workHours != null ? email.workHours + "h" : "-"}</div>
-                <div>金額: {email.workHours != null ? "¥" + Math.round(email.workHours * hourlyRate + transportCost) : "-"}</div>
-              </div>
-              {email.body ? (
-                <pre style={{ whiteSpace: "pre-wrap", background: "#f8fafc", padding: "16px", borderRadius: "12px", border: "1px solid rgba(148,163,184,0.25)", color: "#334155" }}>
-                  {email.body}
-                </pre>
-              ) : (
-                <p style={{ color: "#64748b" }}>本文がありません。</p>
-              )}
-            </div>
-          ))}
-        </section>
       )}
 
       {activeTab === "settings" && (
