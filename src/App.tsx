@@ -465,7 +465,7 @@ function App() {
       const eventDate = parseWorkDate(email.workDate);
       if (!eventDate) return undefined;
 
-      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      //const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
       // time window: whole day
       const dayStart = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate(), 0, 0).toISOString();
       const dayEnd = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate() + 1, 0, 0).toISOString();
